@@ -23,17 +23,34 @@
 #define THERMISTOR_IN_3 A2
 #define THERMISTOR_IN_4 A3
 #define THERMISTOR_IN_5 A4
+#define I2C_SDA 20			// Pins for I2C communication
+#define I2C_SCL 21
 
-// DEFINE RUNNING PARAMETERS
+
+// DEFINE RUNNING PARAMETERS/SETTINGS
 // Fuel cell purge valve timing
 #define PURGE_CLOSED_SECONDS 5 					// Purge valve times only accurate to increments of 0.5 seconds.
 #define PURGE_OPEN_SECONDS 3
+
 // Fuel cell temp measurement and control
 #define FUEL_CELL_IDEAL_TEMP 40					// In degrees C
 #define FUEL_CELL_INDIVIDUAL_MAX_TEMP 60		// If any one temp sensor reads above this, fans will output full..
 #define FUEL_CELL_STANDARD_FANSPEED 170 		// This on a scale of 0-255 for full stop to full go.
 #define FUEL_CELL_MIN_FANSPEED 50				// Fan speed will not drop below this.
 #define FUEL_CELL_FAN_CONTROL_SENSITIVITY 8.5	// In speed units (0-255) per degree C.
+
+// Setup I2C addresses
+#define BMS_VOLTAGE_1_ADDR 
+#define BMS_VOLTAGE_2_ADDR 
+#define BMS_VOLTAGE_3_ADDR 
+#define BMS_VOLTAGE_4_ADDR 
+#define BMS_VOLTAGE_5_ADDR 
+#define BMS_VOLTAGE_6_ADDR 
+#define BMS_VOLTAGE_7_ADDR 
+#define BMS_VOLTAGE_8_ADDR 
+#define BMS_VOLTAGE_9_ADDR 
+#define BMS_VOLTAGE_10_ADDR 
+
 
 // Global variables for valve timing, accessible from ISR.
 volatile int time1Counter = 0;		// Timer 1, to check time between purge valve openings.
@@ -84,26 +101,16 @@ void setup(){
 }
  
 void loop(){
-	// Poll temp sensors
-	// generate ave of temp sensors
-	// Calculate fan speed (127 (off) to 0 (full forwards))
-	// Transmit fan speed.
-	
-	// FAN CONTROL - 127 = 0V, 0 = 24V.
-	// Increments: 0.1890V/decrement.
-	// Must be written to serial1 as a byte type.
-	/*
-	analogWrite(FAN_CONTROL_PIN, 0);
-	delay(10000);
-	analogWrite(FAN_CONTROL_PIN, 255);
-	delay(10000);
-	analogWrite(FAN_CONTROL_PIN, 127);
-	delay(10000);
-	*/
-
+	// Poll temperature sensors and update fan speed.
 	double temperatureArr[6] = {0, 0, 0, 0, 0, 0};	// contains: [therm 1-5 in C, ave temp]
 	pollThermistors(temperatureArr);
 	setFanSpeed(temperatureArr);
+
+	//TODO: Write to SD CARD
+	
+	//TODO: Write to receiver over XBee.
+	
+	//TODO: Poll battery voltage sensors over I2C
 
 }
 	
@@ -151,11 +158,6 @@ void setFanSpeed(double temperatureArr[6]){	// Linear controller for fuel cell c
 			fanSpeed = 255;
 		}
 	}
-	Serial.print("Ave Temp.: ");
-	Serial.print(temperatureArr[5]);
-	Serial.print(", ");
-	Serial.print("fanSpeed = ");
-	Serial.println(fanSpeed);
 	analogWrite(FAN_CONTROL_PIN, fanSpeed);
 }
 
