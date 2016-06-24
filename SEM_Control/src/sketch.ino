@@ -24,11 +24,16 @@
 #define THERMISTOR_IN_4 A3
 #define THERMISTOR_IN_5 A4
 
-
 // DEFINE RUNNING PARAMETERS
-// Purge valve times only accurate to increments of 0.5 seconds.
-#define PURGE_CLOSED_SECONDS 5
+// Fuel cell purge valve timing
+#define PURGE_CLOSED_SECONDS 5 					// Purge valve times only accurate to increments of 0.5 seconds.
 #define PURGE_OPEN_SECONDS 3
+// Fuel cell temp measurement and control
+#define FUEL_CELL_IDEAL_TEMP 40					// In degrees C
+#define FUEL_CELL_INDIVIDUAL_MAX_TEMP 60		// If any one temp sensor reads above this, fans will output full..
+#define FUEL_CELL_STANDARD_FANSPEED 170 		// This on a scale of 0-255 for full stop to full go.
+#define FUEL_CELL_MIN_FANSPEED 50				// Fan speed will not drop below this.
+#define FUEL_CELL_FAN_CONTROL_SENSITIVITY 8.5	// In speed units (0-255) per degree C.
 
 // Global variables for valve timing, accessible from ISR.
 volatile int time1Counter = 0;		// Timer 1, to check time between purge valve openings.
@@ -45,7 +50,9 @@ void setup(){
 	// Initialise pins
     pinMode(PURGE_PIN, OUTPUT);
  	pinMode(FAN_CONTROL_PIN, OUTPUT);
-		// Thermistor pins don't need setup.
+	// Start fans
+	analogWrite(FAN_CONTROL_PIN, FUEL_CELL_STANDARD_FANSPEED);
+
 
     // Initialise timer for purge valve interrupts
     cli();          // disable global interrupts
@@ -94,13 +101,12 @@ void loop(){
 	delay(10000);
 	*/
 
-	double thermistorArr[6] = {0, 0, 0, 0, 0, 0};	// contains: [therm 1-5 in C, ave temp]
-	pollThermistors(thermistorArr);
-	
+	double temperatureArr[6] = {0, 0, 0, 0, 0, 0};	// contains: [therm 1-5 in C, ave temp]
+	pollThermistors(temperatureArr);
+	setFanSpeed(temperatureArr);
 
 }
 	
-
 void pollThermistors(double thermistorArr[6]){	// Polls thermistors, converts voltage to a temperature, returns temps and mean temp.
 	// Read the thermistors.
 	int thermistorArrTMP[5] = {0, 0, 0, 0, 0};	// Stores the raw 0-1023 value returned by analogRead(PIN).
@@ -125,6 +131,32 @@ void pollThermistors(double thermistorArr[6]){	// Polls thermistors, converts vo
 	}
 	thermistorArr[5] = totalTmp/6;
 	return;
+}
+
+void setFanSpeed(double temperatureArr[6]){	// Linear controller for fuel cell cooling fans
+	int tDiff = temperatureArr[5] - FUEL_CELL_IDEAL_TEMP;	// > ideal is +ve, < ideal is -ve.
+	float fanSpeed = FUEL_CELL_STANDARD_FANSPEED + (tDiff * FUEL_CELL_FAN_CONTROL_SENSITIVITY);
+	
+	// Clamp fanSpeed
+	if(fanSpeed < FUEL_CELL_MIN_FANSPEED){
+		fanSpeed = FUEL_CELL_MIN_FANSPEED;
+	}
+	if(fanSpeed >= 255){
+		fanSpeed = 255;
+	}
+	
+	// Check if panic fullspeed on individuals or mean temp.
+	for(int i = 0; i < 6; i++){
+		if(temperatureArr[i] >= FUEL_CELL_INDIVIDUAL_MAX_TEMP){
+			fanSpeed = 255;
+		}
+	}
+	Serial.print("Ave Temp.: ");
+	Serial.print(temperatureArr[5]);
+	Serial.print(", ");
+	Serial.print("fanSpeed = ");
+	Serial.println(fanSpeed);
+	analogWrite(FAN_CONTROL_PIN, fanSpeed);
 }
 
 ISR(TIMER1_COMPA_vect){ // ISR handles purge valve opening/closing.
