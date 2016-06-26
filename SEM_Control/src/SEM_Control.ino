@@ -15,6 +15,10 @@
 #include <avr/io.h>
 #include <avr/interrupt.h>
 
+#include <I2C.h>	// Alternative library for I2C communication
+					// dsscircuits.com/articles/arduino-i2c-master-library
+
+
 // DEFINE PINS
 #define PURGE_PIN 13		// Any digital IO pin.
 #define FAN_CONTROL_PIN 45	// Connect Tx pin of a serial port to S1 on Syren 10a. Choices are 1, 18, 16 and 14 on mega2560.
@@ -40,22 +44,24 @@
 #define FUEL_CELL_FAN_CONTROL_SENSITIVITY 8.5	// In speed units (0-255) per degree C.
 
 // Setup I2C addresses
-#define BMS_VOLTAGE_1_ADDR 
-#define BMS_VOLTAGE_2_ADDR 
-#define BMS_VOLTAGE_3_ADDR 
-#define BMS_VOLTAGE_4_ADDR 
-#define BMS_VOLTAGE_5_ADDR 
-#define BMS_VOLTAGE_6_ADDR 
-#define BMS_VOLTAGE_7_ADDR 
-#define BMS_VOLTAGE_8_ADDR 
-#define BMS_VOLTAGE_9_ADDR 
-#define BMS_VOLTAGE_10_ADDR 
+// Forbidden addresses: 0 to 7, 120 to 127.
+#define BMS_VOLTAGE_1_ADDR 85 	// Test runs with address 85
+#define BMS_VOLTAGE_2_ADDR 86
+#define BMS_VOLTAGE_3_ADDR 87
+#define BMS_VOLTAGE_4_ADDR 88
+#define BMS_VOLTAGE_5_ADDR 89
+#define BMS_VOLTAGE_6_ADDR 90
+#define BMS_VOLTAGE_7_ADDR 91
+#define BMS_VOLTAGE_8_ADDR 92
+#define BMS_VOLTAGE_9_ADDR 93
 
+#define BMS_REQUEST_TIMEOUT 40			// Timeout for BMS voltage sensor poll in ms.
 
 // Global variables for valve timing, accessible from ISR.
 volatile int time1Counter = 0;		// Timer 1, to check time between purge valve openings.
 volatile byte valveOpen = 0;		// Flag to signal whether purge valve is open or not.
 volatile int valveOpenCounter = 0;	// Timer 1, to check how long the purge valve has been open for.
+volatile int BMS_addr_arr[9] = {BMS_VOLTAGE_1_ADDR, BMS_VOLTAGE_2_ADDR, BMS_VOLTAGE_3_ADDR, BMS_VOLTAGE_4_ADDR, BMS_VOLTAGE_5_ADDR, BMS_VOLTAGE_6_ADDR, BMS_VOLTAGE_7_ADDR, BMS_VOLTAGE_8_ADDR, BMS_VOLTAGE_9_ADDR};
 
 // Lookup table for thermistor values
 // Array of 1024 temperature values
@@ -67,11 +73,18 @@ void setup(){
 	// Initialise pins
     pinMode(PURGE_PIN, OUTPUT);
  	pinMode(FAN_CONTROL_PIN, OUTPUT);
-	// Start fans
+	
+	// Start fans at standard fanspeed
 	analogWrite(FAN_CONTROL_PIN, FUEL_CELL_STANDARD_FANSPEED);
-
-
-    // Initialise timer for purge valve interrupts
+	
+	// Join I2C bus with no address
+	//Wire.begin();
+	I2c.begin();
+	I2c.timeOut(BMS_REQUEST_TIMEOUT);
+	//*** INTERRUPT TIMER FOR PURGE VALVE *** //
+    // Uncomment to re-enable purge valve control
+	/*
+	// Initialise timer for purge valve interrupts
     cli();          // disable global interrupts
     TCCR1A = 0;     // set entire TCCR1A register to 0
     TCCR1B = 0;     // same for TCCR1B
@@ -90,30 +103,75 @@ void setup(){
     TIMSK1 |= (1 << OCIE1A);
     // enable global interrupts:
     sei();
-	
+	*/
+
 	// Initialise serial connections
 	Serial.begin(9600);		// Serial reserved for USB connection.
-	Serial1.begin(9600);	// Serial1 on pins Rx:19, Tx:18.
-	
+	Serial1.begin(9600);	// Serial1 on pins Rx:19, Tx:18.	
 	
 	// Wait 5 seconds for everything to settle
-	delay(5000);
+	Serial.println("=== BOOTING... ===");
+	delay(1000);
+	Serial.println("=== BEGIN === ");
 }
  
 void loop(){
-	// Poll temperature sensors and update fan speed.
 	double temperatureArr[6] = {0, 0, 0, 0, 0, 0};	// contains: [therm 1-5 in C, ave temp]
-	pollThermistors(temperatureArr);
-	setFanSpeed(temperatureArr);
+	double BMSVoltageArr[9] = {0, 0, 0, 0, 0, 0, 0, 0, 0};	// BMS voltage sensors 1-10
 
+	// Poll temperature sensors and update fan speed.
+	//pollThermistors(temperatureArr);
+	//setFanSpeed(temperatureArr);
+	
+
+	//TODO: IN PROGRESS: Poll battery voltage sensors over I2C
+	//pollBMSVoltagesOLD(BMSVoltageArr);
+	digitalWrite(PURGE_PIN, HIGH);
+	pollBMSVoltages(BMSVoltageArr);
+	for(int i = 0; i < 9; i++){
+		Serial.print(BMSVoltageArr[i], 4);
+		Serial.print(", ");
+	}
+	digitalWrite(PURGE_PIN, LOW);
+	delay(100);
+	Serial.println(" :: ");
 	//TODO: Write to SD CARD
 	
 	//TODO: Write to receiver over XBee.
 	
-	//TODO: Poll battery voltage sensors over I2C
 
+}	
+
+void pollBMSVoltages(double BMSVoltageArr[9]){
+	byte i2cByte1 = 0;
+	byte i2cByte2 = 0;
+	double vPerDiv = 5.0/1024.0;
+	int startTime = 0;
+	bool failedFlag = false;
+
+	for(int i = 0; i < 9; i++){
+		failedFlag = false;
+		I2c.read(BMS_addr_arr[i], 2);	// Request 2 bytes from the BMS voltage board
+		startTime = millis();
+		while(I2c.available() < 2){			// Wait until 2 bytes available, use a timeout to prevent hanging
+			if((millis() - startTime) >= BMS_REQUEST_TIMEOUT){
+				failedFlag = true;
+				break;
+			}
+		}
+		if(!failedFlag){
+			i2cByte1 = I2c.receive();
+			i2cByte2 = I2c.receive();
+			BMSVoltageArr[i] = (i2cByte1 + (256 * i2cByte2)) * vPerDiv;
+		}
+		else{
+			Serial.println("========== BROKEN ===========");
+			BMSVoltageArr[i] = 0.0;
+		}
+	}
+	return;
 }
-	
+
 void pollThermistors(double thermistorArr[6]){	// Polls thermistors, converts voltage to a temperature, returns temps and mean temp.
 	// Read the thermistors.
 	int thermistorArrTMP[5] = {0, 0, 0, 0, 0};	// Stores the raw 0-1023 value returned by analogRead(PIN).
