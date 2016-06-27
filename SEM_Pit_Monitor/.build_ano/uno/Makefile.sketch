@@ -1,0 +1,14 @@
+
+
+
+
+
+.build_ano/uno/src/SEM_Pit_Monitor.ino.cpp : src/SEM_Pit_Monitor.ino
+	@mkdir -p .build_ano/uno/src
+	@echo [93msrc/SEM_Pit_Monitor.ino[0m
+	@/usr/bin/ano preproc --source-dir src  -o $@ $^
+
+
+all : .build_ano/uno/src/SEM_Pit_Monitor.ino.cpp
+	@true
+
