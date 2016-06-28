@@ -17,6 +17,9 @@
 
 #include <I2C.h>	// Alternative library for I2C communication
 					// dsscircuits.com/articles/arduino-i2c-master-library
+#include <SPI.h>
+#include <SD.h>		// SD card library includes
+#include "Comms.h"	// HUD driver includes
 
 
 // DEFINE PINS
@@ -54,6 +57,8 @@
 #define BMS_VOLTAGE_7_ADDR 91
 #define BMS_VOLTAGE_8_ADDR 92
 #define BMS_VOLTAGE_9_ADDR 93
+#define GPS_SHIELD_ADDR 104		// With both jumpers on GPS shield in, address is 104
+#define HUD_ADDR 8				
 
 #define BMS_REQUEST_TIMEOUT 40			// Timeout for BMS voltage sensor poll in ms.
 
@@ -62,6 +67,13 @@ volatile int time1Counter = 0;		// Timer 1, to check time between purge valve op
 volatile byte valveOpen = 0;		// Flag to signal whether purge valve is open or not.
 volatile int valveOpenCounter = 0;	// Timer 1, to check how long the purge valve has been open for.
 volatile int BMS_addr_arr[9] = {BMS_VOLTAGE_1_ADDR, BMS_VOLTAGE_2_ADDR, BMS_VOLTAGE_3_ADDR, BMS_VOLTAGE_4_ADDR, BMS_VOLTAGE_5_ADDR, BMS_VOLTAGE_6_ADDR, BMS_VOLTAGE_7_ADDR, BMS_VOLTAGE_8_ADDR, BMS_VOLTAGE_9_ADDR};
+volatile int flash = 0;
+
+
+File logFile;
+File runNumberFile;
+int Address;
+byte Data;
 
 // Lookup table for thermistor values
 // Array of 1024 temperature values
@@ -75,12 +87,8 @@ void setup(){
  	pinMode(FAN_CONTROL_PIN, OUTPUT);
 	
 	// Start fans at standard fanspeed
-	analogWrite(FAN_CONTROL_PIN, FUEL_CELL_STANDARD_FANSPEED);
-	
-	// Join I2C bus with no address
-	//Wire.begin();
-	I2c.begin();
-	I2c.timeOut(BMS_REQUEST_TIMEOUT);
+	//analogWrite(FAN_CONTROL_PIN, FUEL_CELL_STANDARD_FANSPEED);
+		
 	//*** INTERRUPT TIMER FOR PURGE VALVE *** //
     // Uncomment to re-enable purge valve control
 	/*
@@ -104,43 +112,333 @@ void setup(){
     // enable global interrupts:
     sei();
 	*/
+	
+	// Join I2C bus with no address
+	//Wire.begin();
+	I2c.begin();
+	I2c.timeOut(BMS_REQUEST_TIMEOUT);
+	
+	// Initialise the SD card
+	SD.begin(4);	// Should really do if(!SD.begin(4)){ /*error handling*/}; // but no
+	int runNumber = 0;
+	// Read the file storing the current lognumber.
+	if(!SD.exists("runNumber.dat")){
+		runNumberFile = SD.open("runNumber.dat", FILE_WRITE);
+		if(runNumberFile){
+			int startFileVal = 0;
+			runNumberFile.write(startFileVal);	// Write as an int, when read it must be cast as int.
+		}
+		runNumberFile.close();
+	}
+	else{
+		runNumberFile = SD.open("runNumber.dat", FILE_READ);
+		if(runNumberFile){
+			runNumber = int(runNumberFile.read());
+		}
+		else{
+			runNumber = 150;	// Some stupid error handling of stupidity
+		}
+		runNumberFile.close();
+		SD.remove("runNumber.dat");
+		runNumberFile = SD.open("runNumber.dat", FILE_WRITE);
+		if(runNumberFile){
+			runNumberFile.write(++runNumber);
+		}
+		runNumberFile.close();
+	}
+	
+	// Open a logfile with the runNumber appended to the name, blindly
+	String logFileFilename = "logFile_" + String(runNumber) + ".csv";
 
+	if(!SD.exists(logFileFilename)){	// If the logfile doesn't already exist, just create and open it.
+		logFile = SD.open(logFileFilename, FILE_WRITE);
+	}
+	else{			// If the logfile does already exist, wipe it and make a new one (avoids CSV formatting issues)
+		SD.remove(logFileFilename);
+		logFile = SD.open(logFileFilename, FILE_WRITE);
+	}	
+/*
+	// Initialise HUD communication
+	CommsSetup();
+	
+	// Set all fields to 0 as default
+	
+	for(int i = 0; i < 5; i++){
+		CommsSetValue(F_VOLTAGE + i, 0.0);	// Values must all be floats
+	}
+	CommsSetValue(F_SPEED, 0.0);
+	CommsSetValue(F_GPSX, 0.0);
+	CommsSetValue(F_GPSY, 0.0);
+	CommsSetValue(F_IDEALSPEED, 0.0);
+	
+	HUDUpdate();
+*/
 	// Initialise serial connections
 	Serial.begin(9600);		// Serial reserved for USB connection.
 	Serial1.begin(9600);	// Serial1 on pins Rx:19, Tx:18.	
 	
+	Serial.println("===================================");
 	// Wait 5 seconds for everything to settle
-	Serial.println("=== BOOTING... ===");
-	delay(1000);
-	Serial.println("=== BEGIN === ");
+	delay(500);
+	logFile.println("time, BMS_V_1, BMS_V_2, BMS_V_3, BMS_V_4, BMS_V_5, BMS_V_6, BMS_V_7, BMS_V_8, BMS_V_9, heading, speed, latitude, longitude");
+
 }
  
 void loop(){
 	double temperatureArr[6] = {0, 0, 0, 0, 0, 0};	// contains: [therm 1-5 in C, ave temp]
 	double BMSVoltageArr[9] = {0, 0, 0, 0, 0, 0, 0, 0, 0};	// BMS voltage sensors 1-10
+	String logFileLine = String(millis()) + ", ";	// Build a string to avoid repeated SD card operations.
+	//String GPSDataArr[5] = {"--", "--", "--", "--", "--"};
+	float GPSDataArr[2] = {0.0, 0.0};	// Heading, Speed
+	String GPSLatLongArr[3] = {"--", "--", "--"};	// Third value is a complete string
+	double BMSVoltageTotal = 0;
 
 	// Poll temperature sensors and update fan speed.
 	//pollThermistors(temperatureArr);
 	//setFanSpeed(temperatureArr);
 	
-
-	//TODO: IN PROGRESS: Poll battery voltage sensors over I2C
-	//pollBMSVoltagesOLD(BMSVoltageArr);
-	digitalWrite(PURGE_PIN, HIGH);
+	//Poll battery voltage sensors over I2C
 	pollBMSVoltages(BMSVoltageArr);
-	for(int i = 0; i < 9; i++){
-		Serial.print(BMSVoltageArr[i], 4);
-		Serial.print(", ");
+	for(int i = 0; i < 8; i++){
+		logFileLine += String(BMSVoltageArr[i], 4);
+		logFileLine += ", ";
+		BMSVoltageTotal += BMSVoltageArr[i];
 	}
-	digitalWrite(PURGE_PIN, LOW);
-	delay(100);
-	Serial.println(" :: ");
-	//TODO: Write to SD CARD
+	logFileLine += String(BMSVoltageArr[8], 4) + ", ";	// Last one outside for loop to avoid trailing delimiter
 	
-	//TODO: Write to receiver over XBee.
+	pollGPS(GPSDataArr, GPSLatLongArr);
+	logFileLine += GPSLatLongArr[2];
+
+	logFile.println(logFileLine);				// Write logfile line to SD card.
+	Serial.println(logFileLine);				// Print to serial port/
+		
+	//CommsSetValue(F_GPSX, 5 + sin(2*PI * pos)*4);
+	//CommsSetValue(F_GPSY, 5 + cos(2*PI * pos)*4);
+	for(int i = 0; i < 5; i++){
+		CommsSetValue(F_VOLTAGE + 0, float(BMSVoltageTotal));
+	}
+	CommsSetValue(F_SPEED, GPSDataArr[1]);	
+
+	// DEMO HUD OVER SERIAL
+	/*
+	flash = (flash + 1) % 384;
+	flash++;
+	float pos = flash/384.0;	
 	
+	CommsSetValue(F_GPSX, 5 + sin(2*PI * pos)*4);
+	CommsSetValue(F_GPSY, 5 + cos(2*PI * pos)*4);
+	CommsSetValue(F_VOLTAGE + 0, 0.5 + sin(2*PI*pos + 0.2));
+	CommsSetValue(F_VOLTAGE + 1, 0.5 + sin(2*PI*pos + 0.4));
+	CommsSetValue(F_VOLTAGE + 2, 0.5 + sin(2*PI*pos + 0.8));
+	CommsSetValue(F_VOLTAGE + 3, 0.5 + sin(2*PI*pos + 1.0));
+	CommsSetValue(F_VOLTAGE + 4, 0.5 + sin(2*PI*pos + 1.2));
+	CommsSetValue(F_SPEED, 25 + sin(2*PI*pos)*8);	
+	*/
+
+	HUDUpdate();
 
 }	
+
+void pollGPS(float GPSDataArr[2], String GPSLatLongArr[3]){		// Taken from example code provided for the GPS Shield	
+	String tempString;
+	String tempString1;
+	// Heading
+	Address = 44;                                       // Point to Heading 1 register
+	Data = GetDouble();                                 // Read registers from GPM
+	//Serial.print(Data, DEC);                            // and print to PC
+	tempString = String(Data, DEC);
+	tempString1 = String(Data, DEC);
+	Address = 46;                                       // Point to Heading 2 register
+	Data = GetSingle();                                 // Read registers from GPM
+	//Serial.print(Data, DEC);                            // and print to PC
+	//Serial.print(".");
+	tempString += String(Data, DEC) + ".";
+	tempString1 += String(Data, DEC) + ".";
+	Address = 47;                                       // Point to Heading 3 register
+	Data = GetSingle();                                 // Read registers from GPM
+	//Serial.println(Data, DEC);                          // and print to PC
+	tempString += String(Data, DEC) + ", ";
+	
+	GPSDataArr[0] = tempString1.toFloat();
+
+	//Serial.print("Speed: ");
+	Address = 52;                                       // Point to Speed 1 register
+	Data = GetDouble();                                 // Read registers from GPM
+	//Serial.print(Data, DEC);                            // and print to PC
+	tempString += String(Data, DEC);	
+	tempString1 = String(Data, DEC);	
+	Address = 54;                                       // Point to Speed 2 register
+	Data = GetSingle();                                 // Read registers from GPM
+	//Serial.print(Data, DEC);                            // and print to PC
+	//Serial.print(".");
+	tempString += String(Data, DEC) + ".";
+	tempString1 += String(Data, DEC) + ".";
+	Address = 55;                                       // Point to Speed 3 register
+	Data = GetSingle();                                 // Read registers from GPM
+	//Serial.println(Data, DEC);                          // and print to PC
+	tempString += String(Data, DEC) + ", ";
+
+	GPSDataArr[1] = tempString1.toFloat();
+
+	//Serial.print("Latitide: ");
+	Address = 14;                                       // Point to Latitude 1 register
+	Data = GetSingle();                                 // Read registers from GPM
+	//Serial.print(Data, DEC);                            // and print to PC
+	tempString += String(Data, DEC);
+	tempString1 = String(Data, DEC);
+	Address = 15;                                       // Point to Latitude 2 register
+	Data = GetSingle();                                 // Read registers from GPM
+	//Serial.print(Data, DEC);                            // and print to PC
+	//Serial.print(" ");
+	tempString += String(Data, DEC) + " ";
+	tempString1 += String(Data, DEC) + " ";
+	
+	Address = 16;                                       // Point to Latitude 3 register
+	Data = GetSingle();                                 // Read registers from GPM
+	//Serial.print(Data, DEC);                            // and print to PC
+	tempString += String(Data, DEC);
+	tempString1 += String(Data, DEC);
+	Address = 17;                                       // Point to Latitude 4 register
+	Data = GetSingle();                                 // Read registers from GPM
+	//Serial.print(Data, DEC);                            // and print to PC
+	//Serial.print(".");
+	tempString += String(Data, DEC) + ".";
+	tempString1 += String(Data, DEC) + ".";
+	Address = 18;                                       // Point to Latitude 5 register
+	Data = GetSingle();                                 // Read registers from GPM
+	//Serial.print(Data, DEC);                            // and print to PC
+	tempString += String(Data, DEC);
+	tempString1 += String(Data, DEC);
+	Address = 19;                                       // Point to Latitude 6 register
+	Data = GetSingle();                                 // Read registers from GPM
+	//Serial.print(Data, DEC);                            // and print to PC
+	tempString += String(Data, DEC);
+	tempString1 += String(Data, DEC);
+	Address = 20;                                       // Point to Latitude 7 register
+	Data = GetSingle();                                 // Read registers from GPM
+	//Serial.print(Data, DEC);                            // and print to PC
+	tempString += String(Data, DEC);
+	tempString1 += String(Data, DEC);
+	Address = 21;                                       // Point to Latitude 8 register
+	Data = GetSingle();                                 // Read registers from GPM
+	//Serial.print(Data, DEC);                            // and print to PC
+	tempString += String(Data, DEC);
+	tempString1 += String(Data, DEC);
+	Address = 22;                                       // Point to Latitude character register
+	Data = GetSingle();                                 // Read registers from GPM
+	//Serial.println(Data);                               // and print to PC
+	tempString += String(Data, DEC) + ", ";
+	
+	GPSLatLongArr[0] = tempString1;
+
+	//Serial.print("Longitude: ");
+	Address = 23;                                       // Point to Longitude 1 register
+	Data = GetSingle();                                 // Read registers from GPM
+	//Serial.print(Data, DEC);                            // and print to PC
+	tempString += String(Data, DEC);
+	tempString1 = String(Data, DEC);
+	Address = 24;                                       // Point to Longitude 2 register
+	Data = GetSingle();                                 // Read registers from GPM
+	//Serial.print(Data, DEC);                            // and print to PC
+	tempString += String(Data, DEC);
+	tempString1 += String(Data, DEC);
+	Address = 25;                                       // Point to Longitude 3 register
+	Data = GetSingle();                                 // Read registers from GPM
+	//Serial.print(Data, DEC);                            // and print to PC
+	//Serial.print(" ");
+	tempString += String(Data, DEC) + " ";
+	tempString1 += String(Data, DEC) + " ";
+	Address = 26;                                       // Point to Longitude 4 register
+	Data = GetSingle();                                 // Read registers from GPM
+	//Serial.print(Data, DEC);                            // and print to PC
+	tempString += String(Data, DEC);
+	tempString1 += String(Data, DEC);
+	Address = 27;                                       // Point to Longitude 5 register
+	Data = GetSingle();                                 // Read registers from GPM
+	//Serial.print(Data, DEC);                            // and print to PC
+	//Serial.print(".");
+	tempString += String(Data, DEC) + ".";
+	tempString1 += String(Data, DEC) + ".";
+	Address = 28;                                       // Point to Longitude 6 register
+	Data = GetSingle();                                 // Read registers from GPM
+	//Serial.print(Data, DEC);                            // and print to PC
+	tempString += String(Data, DEC);
+	tempString1 += String(Data, DEC);
+	Address = 29;                                       // Point to Longitude 7 register
+	Data = GetSingle();                                 // Read registers from GPM
+	//Serial.print(Data, DEC);                            // and print to PC
+	tempString += String(Data, DEC);
+	tempString1 += String(Data, DEC);
+	Address = 30;                                       // Point to Longitude 8 register
+	Data = GetSingle();                                 // Read registers from GPM
+	//Serial.print(Data, DEC);                            // and print to PC
+	tempString += String(Data, DEC);
+	tempString1 += String(Data, DEC);
+	Address = 31;                                       // Point to Longitude 9 register
+	Data = GetSingle();                                 // Read registers from GPM
+	//Serial.print(Data, DEC);                            // and print to PC
+	tempString += String(Data, DEC);
+	tempString1 += String(Data, DEC);
+	Address = 32;                                       // Point to Longitude character register
+	Data = GetSingle();                                 // Read registers from GPM
+	//Serial.println(Data);                               // and print to PC
+	tempString += String(Data, DEC);
+	tempString1 += String(Data, DEC);
+	
+	GPSLatLongArr[1] = tempString1;
+	GPSLatLongArr[2] = tempString;
+	return;
+}
+
+int GetDouble(){                      // Get double register value from GPM
+	int Value = 0; 
+	byte H_Byte = 0;
+	byte L_Byte = 0;
+	int startTime = 0;
+
+	I2c.read(GPS_SHIELD_ADDR, Address, 2);
+	bool failedFlag = false;
+	startTime = millis();
+	while(I2c.available() < 2){			// Wait until 2 bytes available, use a timeout to prevent hanging
+		if((millis() - startTime) >= BMS_REQUEST_TIMEOUT){	// Use the BMS timeout because reasons
+			failedFlag = true;
+			break;
+		}
+	}
+	if(!failedFlag){
+		H_Byte = I2c.receive();
+		L_Byte = I2c.receive();
+	}
+	else{	// Error handling
+		H_Byte = 0;
+		L_Byte = 0;
+	}
+
+	Value = (H_Byte * 10) + L_Byte;                     // Adjust for one byte
+	return(Value);                              
+}
+
+int GetSingle(){                      // Get single register value from GPM
+	int Value = 0; 
+	int startTime = 0;
+	
+	I2c.read(GPS_SHIELD_ADDR, Address, 1);
+	bool failedFlag = false;
+	startTime = millis();
+	while(I2c.available() < 1){		
+		if((millis() - startTime) >= BMS_REQUEST_TIMEOUT){	// Use the BMS timeout because reasons
+			failedFlag = true;
+			break;
+		}
+	}
+	if(!failedFlag){
+		Value = I2c.receive();
+	}
+	else{	// Error handling
+		Value = 0;
+	}
+	return(Value);                              
+}
 
 void pollBMSVoltages(double BMSVoltageArr[9]){
 	byte i2cByte1 = 0;
@@ -163,9 +461,11 @@ void pollBMSVoltages(double BMSVoltageArr[9]){
 			i2cByte1 = I2c.receive();
 			i2cByte2 = I2c.receive();
 			BMSVoltageArr[i] = (i2cByte1 + (256 * i2cByte2)) * vPerDiv;
+			if(BMSVoltageArr[i] < 0){
+				BMSVoltageArr[i] = 0;
+			}	// Clamp bizarre -159V error to 0 (happens when input floats)
 		}
 		else{
-			Serial.println("========== BROKEN ===========");
 			BMSVoltageArr[i] = 0.0;
 		}
 	}
