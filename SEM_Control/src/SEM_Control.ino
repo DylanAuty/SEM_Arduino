@@ -227,10 +227,6 @@ void loop(){
 	
 	// Poll GPS sensor for position, heading and speed.
 	pollGPS(GPSDataArr, GPSLatLongArr, GPSString);
-	Serial.print("================== ");
-	Serial.print(GPSLatLongArr[0]);
-	Serial.print(", ");
-	Serial.println(GPSLatLongArr[1]);
 
 	//logFileLine += GPSLatLongArr[2];
 	logFileLine += GPSString;
@@ -394,8 +390,6 @@ void pollGPS(float GPSDataArr[2], float GPSLatLongArr[3], String& GPSString){		/
 	tempMins += String(Data, DEC);
 
 	GPSLatLongArr[0] = (tempDegs.toFloat() + (tempMins.toFloat()/60));
-	Serial.print("########");
-	Serial.println(GPSLatLongArr[0], 4);
 
 	//Serial.print("Longitude: ");
 	Address = 23;                                       // Point to Longitude 1 register
